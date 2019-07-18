@@ -987,6 +987,9 @@ shape_from_ref(r, b::ACAD=current_backend()) =
         elseif 103 <= code <= 106
             polygon(ACADLineVertices(c, r),
                     backend=b, ref=ref)
+        elseif code == 107
+            closed_spline(ACADSplineInterpPoints(c, r)[1:end-1],
+                          backend=b, ref=ref)
         else
             #unknown(backend=b, ref=ref)
             unknown(r, backend=b, ref=LazyRef(b, ACADNativeRef(r), 0, 0))# To force copy

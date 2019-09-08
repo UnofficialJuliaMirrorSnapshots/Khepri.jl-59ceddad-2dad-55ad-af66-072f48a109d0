@@ -42,6 +42,7 @@ export Shape,
 
 
 #Backends are types parameterized by a key identifying the backend (e.g., AutoCAD) and by the type of reference they use
+
 abstract type Backend{K,R} end
 Base.show(io::IO, b::Backend{K,R}) where {K,R} = print(io, backend_name(b))
 
@@ -196,37 +197,36 @@ collecting_shapes(fn) =
 #Traceability
 traceability = Parameter(false)
 trace_depth = Parameter(1000)
+excluded_modules = Parameter([Base, Base.CoreLogging, Khepri])
 # We a dict from shapes to file locations
 # and a dict from file locations to shapes
 shape_to_file_locations = IdDict()
 file_location_to_shapes = Dict()
 
-export traceability, trace_depth, clear_trace!, shape_source, source_shapes
+export traceability, trace_depth, excluded_modules, clear_trace!, shape_source, source_shapes
 
-shape_source(s) = shape_to_file_locations[s]
-source_shapes(file, line) = file_location_to_shapes[(file, line)]
+shape_source(s) = get(shape_to_file_locations, s, [])
+source_shapes(file, line) = get(file_location_to_shapes, (file, line), [])
 
 clear_trace!() =
   begin
     empty!(shape_to_file_locations)
     empty!(file_location_to_shapes)
   end
-
+#=
+We do not care about frames that are unrelated to the application.
+=#
 interesting_locations(frames) =
   let locations = [],
-      i = 2
-    while i < length(frames)-15 # magic number that represents the number of frames to discard
-      let path = string(frames[i].file)
-        if ! (startswith(path, ".\\") ||
-              endswith(path, "Shapes.jl") ||
-              endswith(path, "Parameters.jl") ||
-              startswith(path, ".\\none")) # redundant, I know
-          push!(locations, (frames[i].file, frames[i].line))
+      max_depth = min(trace_depth(), length(frames)-0)#14)
+    for i in 2:max_depth
+      let frame = frames[i],
+          linfo = frame.linfo
+        if linfo isa Core.CodeInfo ||
+           (linfo isa Core.MethodInstance &&
+            ! (linfo.def.module in excluded_modules()))
+          push!(locations, (frame.file, frame.line))
         end
-      end
-      i = i+1
-      if i > trace_depth()
-        break
       end
     end
     locations
@@ -826,6 +826,23 @@ export default_level, default_level_to_level_height, upper_level
 @defproxy(column, Shape3D, center::Loc, bottom_level::Any, top_level::Any, family::Any)
 =#
 
+#=
+
+One of the problems with BIM is that sometimes it is useful to create objects
+incrementally, e.g., a wall with doors and windows, or a slab with an opening but
+in some backends, this needs to be done atomically.
+
+To solve this problem, we create a form that temporarily delays realization:
+=#
+
+export with_incremental_construction
+with_incremental_construction(f::Function) =
+  let s = with(immediate_mode, false) do
+            f()
+          end
+    immediate_mode() ? ref(s) : s
+    s
+  end
 
 #=
 
@@ -1150,47 +1167,53 @@ A wall contains doors and windows
           bottom_level::Level=default_level(),
           top_level::Level=upper_level(bottom_level),
           family::WallFamily=default_wall_family(),
+          offset::Real=0.0,
           doors::Shapes=Shape[], windows::Shapes=Shape[])
 wall(p0::Loc, p1::Loc;
      bottom_level::Level=default_level(),
      top_level::Level=upper_level(bottom_level),
-     family::WallFamily=default_wall_family()) =
-    wall([p0, p1], bottom_level=bottom_level, top_level=top_level, family=family)
+     family::WallFamily=default_wall_family(),
+     offset::Real=0.0) =
+    wall([p0, p1], bottom_level=bottom_level, top_level=top_level,
+         family=family, offset=offset)
 
+# Right and Left considering observer looking along with curve direction
+r_thickness(w::Wall) = (+1+w.offset)/2*w.family.thickness
+l_thickness(w::Wall) = (-1+w.offset)/2*w.family.thickness
 # Door
 
 @deffamily(door_family, Family,
-    width::Real=1.0,
-    height::Real=2.0,
-    thickness::Real=0.05)
+  width::Real=1.0,
+  height::Real=2.0,
+  thickness::Real=0.05)
 
 @defproxy(door, Shape3D, wall::Wall=required(), loc::Loc=u0(), flip_x::Bool=false, flip_y::Bool=false, family::DoorFamily=default_door_family())
 
 # Window
 
 @deffamily(window_family, Family,
-    width::Real=1.0,
-    height::Real=2.0,
-    thickness::Real=0.05)
+  width::Real=1.0,
+  height::Real=2.0,
+  thickness::Real=0.05)
 
 @defproxy(window, Shape3D, wall::Wall=required(), loc::Loc=u0(), flip_x::Bool=false, flip_y::Bool=false, family::WindowFamily=default_window_family())
 
 # Default implementation
 realize(b::Backend, w::Wall) =
-    realize_wall_openings(b, w, realize_wall_no_openings(b, w), [w.doors..., w.windows...])
+  realize_wall_openings(b, w, realize_wall_no_openings(b, w), [w.doors..., w.windows...])
 
 realize_wall_no_openings(b::Backend, w::Wall) =
-    let w_base_height = w.bottom_level.height,
-        w_height = w.top_level.height - w_base_height,
-        w_path = translate(w.path, vz(w_base_height))
-        w_thickness = w.family.thickness
-        ensure_ref(b, backend_wall(b, w_path, w_height, w_thickness, w.family))
-    end
+  let w_base_height = w.bottom_level.height,
+      w_height = w.top_level.height - w_base_height,
+      w_path = translate(w.path, vz(w_base_height)),
+      w_thickness = w.family.thickness
+    ensure_ref(b, backend_wall(b, w_path, w_height, w_thickness, w.family))
+  end
 
 realize_wall_openings(b::Backend, w::Wall, w_ref, openings) =
     let w_base_height = w.bottom_level.height,
         w_height = w.top_level.height - w_base_height,
-        w_path = translate(w.path, vz(w_base_height))
+        w_path = translate(w.path, vz(w_base_height)),
         w_thickness = w.family.thickness
         for opening in openings
             w_ref = realize_wall_opening(b, w_ref, w_path, w_thickness, opening, w.family)
@@ -1201,10 +1224,10 @@ realize_wall_openings(b::Backend, w::Wall, w_ref, openings) =
     end
 
 realize_wall_opening(b::Backend, w_ref, w_path, w_thickness, op, family) =
-    let op_base_height = op.loc.y
-        op_height = op.family.height
-        op_thickness = op.family.thickness
-        op_path = translate(subpath(w_path, op.loc.x, op.loc.x + op.family.width), vz(op_base_height))
+    let op_base_height = op.loc.y,
+        op_height = op.family.height,
+        op_thickness = op.family.thickness,
+        op_path = translate(subpath(w_path, op.loc.x, op.loc.x + op.family.width), vz(op_base_height)),
         op_ref = ensure_ref(b, backend_wall(b, op_path, op_height, w_thickness*1.1, family))
         ensure_ref(b, subtract_ref(b, w_ref, op_ref))
     end
@@ -1474,6 +1497,17 @@ reset_backend(b::SocketBackend) =
     close(b.connection())
     reset(b.connection)
   end
+
+#One less dynamic option is to use a file-based backend. To that end, we implement
+#the IOBuffer_Backend
+
+struct IOBufferBackend{K,T} <: Backend{K,T}
+  out::IOBuffer
+end
+connection(backend::IOBufferBackend) = backend.out
+
+
+################################################################################
 bounding_box(shape::Shape) =
   bounding_box([shape])
 

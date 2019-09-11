@@ -27,7 +27,6 @@ export Shape,
        instantiate_block,
        reset_backend,
        connection,
-       immediate_mode,
        Backend,
        @deffamily,
        @defproxy,
@@ -166,8 +165,6 @@ ref(s::Proxy) =
 
 ensure_ref(b::Backend{K,T}, v::Proxy) where {K,T} = ref(v)
 
-
-
 #This is a dangerous operation. I'm not sure it should exist.
 set_ref!(s::Proxy, value) = s.ref.value = value
 
@@ -181,10 +178,41 @@ map_ref(f::Function, s::Shape) = map_ref(s.ref.backend, f, ref(s))
 collect_ref(s::Shape) = collect_ref(s.ref.backend, ref(s))
 collect_ref(ss::Shapes) = mapreduce(collect_ref, vcat, ss, init=[])
 
+#=
+Whenever a shape is created, it might be eagerly realized in its backend,
+depending on the kind of shape and on the kind of backend (and/or its current state).
+Another possibility is for the shape to be saved in some container.
+It might also be necessary to record the control flow that caused the shape to be created.
+This means that we need to control what happens immediately after a shape is initialized.
+The protocol after_init takes care of that.
+=#
 
-immediate_mode = Parameter(true)
+after_init(a::Any) = a
+after_init(s::Shape) = maybe_trace(maybe_collect(maybe_realize(s)))
+
+#=
+Many backends can immediately realize a shape while supporting further modifications
+e.g., using boolean operations. Others, however, cannot do that and can only realize
+shapes by request, presumably, when they have complete information about them.
+=#
+
+abstract type LazyBackend{K,T} <: Backend{K,T} end
+
+maybe_realize(s::Shape, b::Backend=backend(s)) =
+  maybe_realize(b, s)
+
+maybe_realize(b::Backend, s::Shape) = force_realize(s)
+maybe_realize(b::LazyBackend, s::Shape) = delay_realize(b, s)
+delay_realize(b::LazyBackend, s::Shape) = (push!(b.shapes, s); s)
+force_realize(s::Shape) = (ref(s); s)
+
+#=
+Frequently, we need to collect all shapes that are created:
+=#
+
 in_shape_collection = Parameter(false)
 collected_shapes = Parameter(Shape[])
+collect_shape!(s::Shape) = (push!(collected_shapes(), s); s)
 collecting_shapes(fn) =
     with(collected_shapes, Shape[]) do
         with(in_shape_collection, true) do
@@ -192,6 +220,7 @@ collecting_shapes(fn) =
         end
         collected_shapes()
     end
+maybe_collect(s::Shape) = (in_shape_collection() && collect_shape!(s); s)
 
 ######################################################
 #Traceability
@@ -239,23 +268,12 @@ trace!(s) =
     for location in locations
       file_location_to_shapes[location] = Shape[get(file_location_to_shapes, location, [])..., s]
     end
+    s
   end
 
+maybe_trace(s) = (traceability() && trace!(s); s)
+
 ######################################################
-
-create(s::Shape) =
-    begin
-        immediate_mode() && ref(s)
-        in_shape_collection() && push!(collected_shapes(), s)
-        traceability() && trace!(s)
-        s
-    end
-
-force_creation(s::Shape) =
-    begin
-        ref(s)
-        s
-    end
 
 replace_in(expr::Expr, replacements) =
     if expr.head == :.
@@ -368,7 +386,7 @@ macro defproxy(name, parent, fields...)
       $(struct_fields...)
     end
     $(constructor_name)($(opt_params...); $(key_params...), backend::Backend=current_backend(), ref::LazyRef=LazyRef(backend)) =
-      create($(struct_name)(ref, $(field_converts...)))
+      after_init($(struct_name)(ref, $(field_converts...)))
     $(predicate_name)(v::$(struct_name)) = true
     $(predicate_name)(v::Any) = false
     $(map((selector_name, field_name) -> :($(selector_name)(v::$(struct_name)) = v.$(field_name)),
@@ -808,7 +826,6 @@ frame_at(s::SurfaceCircle, u::Real, v::Real) = add_pol(s.center, u, v)
 abstract type Measure <: Proxy end
 
 @defproxy(level, Measure, height::Real=0.0)
-create(s::Measure) = s
 
 default_level = Parameter{Level}(level())
 default_level_to_level_height = Parameter{Real}(3)
@@ -825,24 +842,6 @@ export default_level, default_level_to_level_height, upper_level
 
 @defproxy(column, Shape3D, center::Loc, bottom_level::Any, top_level::Any, family::Any)
 =#
-
-#=
-
-One of the problems with BIM is that sometimes it is useful to create objects
-incrementally, e.g., a wall with doors and windows, or a slab with an opening but
-in some backends, this needs to be done atomically.
-
-To solve this problem, we create a form that temporarily delays realization:
-=#
-
-export with_incremental_construction
-with_incremental_construction(f::Function) =
-  let s = with(immediate_mode, false) do
-            f()
-          end
-    immediate_mode() ? ref(s) : s
-    s
-  end
 
 #=
 

@@ -625,6 +625,10 @@ revolve(profile::Shape=point(x(1)), p::Loc=u0(), n::Vec=vz(1,p.cs), start_angle:
     revolve_curve(profile, p, n, start_angle, amplitude)
   elseif is_surface(profile)
     revolve_surface(profile, p, n, start_angle, amplitude)
+  elseif is_union_shape(profile)
+    union(map(s->revolve(s, p, n, start_angle, amplitude), profile.shapes))
+  elseif is_empty_shape(profile)
+    profile
   else
     error("Profile is neither a point nor a curve nor a surface")
   end
@@ -1411,8 +1415,8 @@ import Base.union
 export union, intersection, subtraction
 
 @defproxy(union_shape, Shape3D, shapes::Shapes=Shape[])
-union(shapes::Shapes) = union_shape(shapes)
-union(shape::Shape, shapes...) = union_shape([shape, shapes...])
+union(shapes::Shapes) = union_shape(filter(s -> !is_empty_shape(s), shapes))
+union(shape::Shape, shapes...) = union([shape, shapes...])
 
 @defproxy(intersection_shape, Shape3D, shapes::Shapes=Shape[])
 intersection(shapes::Shapes) = intersection_shape(shapes)

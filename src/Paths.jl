@@ -16,7 +16,11 @@ export open_path,
        centered_rectangular_path,
        open_polygonal_path,
        closed_polygonal_path,
+       open_spline_path,
+       closed_spline_path,
        path_set,
+       open_path_sequence,
+       closed_path_sequence,
        translate,
        stroke,
        fill,
@@ -30,9 +34,10 @@ export open_path,
 
 abstract type Path end
 
-import Base.getindex, Base.endof
+import Base.getindex, Base.firstindex, Base.lastindex
 getindex(p::Path, i::Real) = location_at_length(p, i)
-endof(p::Path) = length(p)
+firstindex(p::Path) = 0
+lastindex(p::Path) = length(p)
 getindex(p::Path, i::ClosedInterval) = subpath(p, i.left, i.right)
 
 abstract type OpenPath <: Path end
@@ -90,6 +95,21 @@ ensure_no_repeated_locations(locs) =
         locs
     end
 
+# Splines
+
+struct OpenSplinePath <: OpenPath
+    vertices::Locs
+    v0::Union{Bool,Vec}
+    v1::Union{Bool,Vec}
+end
+open_spline_path(vertices=[u0(), x(), xy(), y()], v0=false, v1=false) =
+    OpenSplinePath(vertices, v0, v1)
+
+struct ClosedSplinePath <: ClosedPath
+    vertices::Locs
+end
+closed_spline_path(vertices=[u0(), x(), xy(), y()]) = ClosedSplinePath(ensure_no_repeated_locations(vertices))
+
 # There is a set of operations over Paths:
 # 1. translate a path a given vector
 # 2. stroke a path
@@ -100,17 +120,19 @@ ensure_no_repeated_locations(locs) =
 
 translate(path::CircularPath, v::Vec) = circular_path(path.center + v, path.radius)
 translate(path::RectangularPath, v::Vec) = rectangular_path(path.corner + v, path.dx, path.dy)
-translate(path::OpenPolygonalPath, v::Vec) = open_polygonal_path(map(p->p+v, path.vertices))
-translate(path::ClosedPolygonalPath, v::Vec) = closed_polygonal_path(map(p->p+v, path.vertices))
+translate(path::OpenPolygonalPath, v::Vec) = open_polygonal_path(translate(path.vertices, v))
+translate(path::ClosedPolygonalPath, v::Vec) = closed_polygonal_path(translate(path.vertices, v))
 translate(path::ArcPath, v::Vec) = arc_path(path.center + v, path.radius, path.start_angle, path.amplitude)
-
+translate(path::OpenSplinePath, v::Vec) = open_polygonal_path(translate(path.vertices, v), path.v0, path.v1)
+translate(path::ClosedSplinePath, v::Vec) = closed_polygonal_path(translate(path.vertices, v))
+translate(ps::Locs, v::Vec) = map(p->p+v, ps)
 
 
 curve_length(path::CircularPath) = 2*pi*path.radius
 curve_length(path::RectangularPath) = 2*(path.dx + path.dy)
 curve_length(path::OpenPolygonalPath) = curve_length(path.vertices)
 curve_length(path::ClosedPolygonalPath) = curve_length(path.vertices) + distance(path.vertices[end], path.vertices[1])
-curve_length(ps::Vector{<:Loc}) =
+curve_length(ps::Locs) =
   let p = ps[1]
       l = 0.0
     for i in 2:length(ps)
@@ -385,7 +407,22 @@ subpath_ending_at(pathOp::ArcOp, d::Real) =
 subpath(path::PathOps, a::Real, b::Real) =
     subpath_starting_at(subpath_ending_at(path, b), a)
 
+# A path sequence is a sequence of paths where the next element of the sequence
+# starts at the same place where the previous element ends.
 
+struct OpenPathSequence <: OpenPath
+    paths::Vector{<:Path}
+end
+open_path_sequence(paths...) =
+    OpenPathSequence(ensure_connected_paths([paths...]))
+struct ClosedPathSequence <: ClosedPath
+    paths::Vector{<:Path}
+end
+closed_path_sequence(paths...) =
+    ClosedPathSequence(ensure_connected_paths([paths...]))
+
+ensure_connected_paths(paths) = # AML: Finish this
+    paths
 
 
 # A path set is a set of independent paths.
@@ -446,12 +483,64 @@ convert(::Type{OpenPolygonalPath}, path::ClosedPolygonalPath) =
     open_polygonal_path(vcat(path.vertices, [path.vertices[1]]))
 convert(::Type{OpenPolygonalPath}, path::RectangularPath) =
     convert(OpenPolygonalPath, convert(ClosedPolygonalPath, path))
+convert(::Type{OpenPolygonalPath}, path::OpenSplinePath) = # ERROR: ignores limit vectors
+  let interpolator = curve_interpolator(path.vertices),
+      fixed_normal(vn, vt) = norm(vn) < 1e-10 ? SVector{3}(vpol(1, sph_phi(xyz(vt[1],vt[2],vt[3], world_cs))+pi/2).raw[1:3]) : vn
+    open_polygonal_path(
+      map_division(
+        t-> let p = interpolator(t),
+                vt = Interpolations.gradient(interpolator, t)[1],
+                vn = fixed_normal(Interpolations.hessian(interpolator, t)[1], vt)
+                vy = cross(vt, vn)
+              loc_from_o_vx_vy(
+                xyz(p[1], p[2], p[3], world_cs),
+                vxyz(vn[1], vn[2], vn[3], world_cs),
+                vxyz(vy[1], vy[2], vy[3], world_cs))
+            end,
+        0.0, 1.0, 64)) # HACK this must be parameterized!
+    end
+
+curve_interpolator(pts::Locs) =
+    let pts = map(pts) do p
+                let v = in_world(p).raw
+                  SVector{3,Float64}(v[1], v[2], v[3])
+                end
+              end
+        Interpolations.scale(
+            interpolate(pts, BSpline(Cubic(Natural(OnGrid())))),
+            range(0,stop=1,length=size(pts, 1)))
+    end
+
+
+convert(::Type{ClosedPolygonalPath}, path::ClosedPathSequence) =
+  let paths = path.paths,
+      vertices = []
+    for path in paths
+      append!(vertices, convert(OpenPolygonalPath, path).vertices[1:end-1])
+    end
+    closed_polygonal_path(vertices)
+  end
+
+convert(::Type{OpenPolygonalPath}, path::OpenPathSequence) =
+  let paths = path.paths,
+      vertices = []
+    for path in paths[1:end-1]
+      append!(vertices, convert(OpenPolygonalPath, path).vertices[1:end-1])
+    end
+    append!(vertices, convert(OpenPolygonalPath, paths[end]).vertices)
+    open_polygonal_path(vertices)
+  end
+
+
+
 
 #### Utilities
 export path_vertices, subpaths, subtract_paths
 
 path_vertices(path::OpenPolygonalPath) = path.vertices
 path_vertices(path::ClosedPolygonalPath) = path.vertices
+path_vertices(path::OpenSplinePath) = path.vertices
+path_vertices(path::ClosedSplinePath) = path.vertices
 path_vertices(path::Path) = path_vertices(convert(ClosedPolygonalPath, path))
 
 subpaths(path::OpenPolygonalPath) =

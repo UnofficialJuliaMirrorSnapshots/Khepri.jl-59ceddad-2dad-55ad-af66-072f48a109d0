@@ -386,7 +386,7 @@ macro defproxy(name, parent, fields...)
       ref::LazyRef
       $(struct_fields...)
     end
-    $(constructor_name)($(opt_params...); $(key_params...), backend::Backend=current_backend(), ref::LazyRef=LazyRef(backend)) =
+    @noinline $(constructor_name)($(opt_params...); $(key_params...), backend::Backend=current_backend(), ref::LazyRef=LazyRef(backend)) =
       after_init($(struct_name)(ref, $(field_converts...)))
     $(predicate_name)(v::$(struct_name)) = true
     $(predicate_name)(v::Any) = false
@@ -430,17 +430,6 @@ closed_line(v0::Loc, v1::Loc, vs...) = closed_line([v0, v1, vs...])
 @defproxy(spline, Shape1D, points::Locs=[u0(), ux(), uy()], v0::Union{Bool,Vec}=false, v1::Union{Bool,Vec}=false,
           interpolator::Parameter{Any}=Parameter{Any}(missing))
 spline(v0::Loc, v1::Loc, vs...) = spline([v0, v1, vs...])
-
-curve_interpolator(pts::Locs) =
-    let pts = map(pts) do p
-                let v = in_world(p).raw
-                  SVector{3,Float64}(v[1], v[2], v[3])
-                end
-              end
-        Interpolations.scale(
-            interpolate(pts, BSpline(Cubic(Natural(OnGrid())))),
-            range(0,stop=1,length=size(pts, 1)))
-    end
 
 #=
 evaluate(s::Spline, t::Real) =
@@ -518,6 +507,9 @@ surface_rectangle(p::Loc, q::Loc) =
 surface(c0::Shape, cs...) = surface([c0, cs...])
 #To be removed
 surface_from = surface
+
+@defproxy(surface_path, Shape2D, path::ClosedPath=[circular_path()])
+realize(b::Backend, s::SurfacePath) = backend_fill(b, s.path)
 
 surface_boundary(s::Shape2D, backend::Backend=current_backend()) =
     backend_surface_boundary(backend, s)
@@ -795,6 +787,13 @@ backend_stroke(b::Backend, path::PathSet) =
 import Base.fill
 fill(path, backend=current_backend()) = backend_fill(backend, path)
 backend_fill(b, path) = backend_fill_curves(b, backend_stroke(b, path))
+
+backend_stroke(b::Backend, path::Union{OpenPathSequence,ClosedPathSequence}) =
+    backend_stroke_unite(b, map(path->backend_stroke(b, path), path.paths))
+backend_fill(b::Backend, path::ClosedPathSequence) =
+    backend_fill_curves(b, map(path->backend_stroke(b, path), path.paths))
+
+
 #####################################################################
 ## Conversions
 
@@ -1026,7 +1025,7 @@ macro deffamily(name, parent, fields...)
                         based_on=nothing,
                         implemented_as=IdDict{Backend, Family}()) =
       $(struct_name)($(field_names...), based_on, implemented_as, Parameter{Any}(nothing))
-    $(instance_name)(family:: Family, implemented_as=family.implemented_as; $(instance_params...)) =
+    $(instance_name)(family:: Family, implemented_as=copy(family.implemented_as); $(instance_params...)) =
       $(struct_name)($(field_names...), family, implemented_as, Parameter{Any}(nothing))
     $(default_name) = Parameter($(constructor_name)())
     $(predicate_name)(v::$(struct_name)) = true
@@ -1148,13 +1147,14 @@ realize(b::Backend, s::SlabOpening) =
 
 #TODO Pass the provided backend
 realize(b::Backend, s::Panel) =
-    let p1 = s.vertices[1],
-        p2 = s.vertices[2],
-        p3 = s.vertices[3],
-        n = vz(s.family.thickness, cs_from_o_vx_vy(p1, p2-p1, p3-p1))
-        ref(irregular_prism(map(p -> in_world(p - n), s.vertices),
-                            in_world(n*2)))
-    end
+  let #p1 = s.vertices[1],
+      #p2 = s.vertices[2],
+      #p3 = s.vertices[3],
+      #n = vz(s.family.thickness, cs_from_o_vx_vy(p1, p2-p1, p3-p1))
+      verts = in_world.(s.vertices)
+      n = vertices_normal(verts)*(s.family.thickness/2)
+    ref(irregular_prism(map(p -> p - n, verts), n*2))
+  end
 
 #=
 
@@ -1415,7 +1415,13 @@ import Base.union
 export union, intersection, subtraction
 
 @defproxy(union_shape, Shape3D, shapes::Shapes=Shape[])
-union(shapes::Shapes) = union_shape(filter(s -> !is_empty_shape(s), shapes))
+union(shapes::Shapes) =
+  let non_empty_shapes = filter(s -> !is_empty_shape(s), shapes)
+    non_empty_shapes == [] ?
+      empty_shape() :
+      union_shape(non_empty_shapes)
+  end
+
 union(shape::Shape, shapes...) = union([shape, shapes...])
 
 @defproxy(intersection_shape, Shape3D, shapes::Shapes=Shape[])

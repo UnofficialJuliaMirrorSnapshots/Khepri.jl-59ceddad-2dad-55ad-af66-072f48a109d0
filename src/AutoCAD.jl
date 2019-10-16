@@ -58,26 +58,27 @@ update_plugin() =
 checked_plugin = false
 
 check_plugin() =
-    begin
-        global checked_plugin
-        if ! checked_plugin
-            @info("Checking AutoCAD plugin...")
-            try
-                update_plugin()
-                @info("done.")
-                checked_plugin = true
-            catch exc
-                if isa(exc, Base.IOError)
-                    @error("""The AutoCAD plugin is outdated!
-                    Please, close AutoCAD and restart Khepri,
-                    only starting AutoCAD when requested by Khepri.""")
-                    throw(exc)
-                else
-                    throw(exc)
-                end
-            end
+  begin
+    global checked_plugin
+    if ! checked_plugin
+      @info("Checking AutoCAD plugin...")
+      for i in 1:10
+        try
+          update_plugin()
+          @info("done.")
+          checked_plugin = true
+          return
+        catch exc
+          if isa(exc, Base.IOError) && i < 10
+            @error("The AutoCAD plugin is outdated! Please, close AutoCAD.")
+            sleep(5)
+          else
+            throw(exc)
+          end
         end
+      end
     end
+  end
 
 
 #app = AutoCAD()
@@ -287,6 +288,26 @@ backend_fill(b::ACAD, path::RectangularPath) =
         dy = path.dy
         ACADSurfaceClosedPolyLine(connection(b), [c, add_x(c, dx), add_xy(c, dx, dy), add_y(c, dy)])
     end
+backend_stroke(b::ACAD, path::OpenSplinePath) =
+  if (path.v0 == false) && (path.v1 == false)
+    #ACADSpline(connection(b), path.vertices)
+    ACADInterpSpline(connection(b),
+                     path.vertices,
+                     path.vertices[2]-path.vertices[1],
+                     path.vertices[end]-path.vertices[end-1])
+  elseif (path.v0 != false) && (path.v1 != false)
+    ACADInterpSpline(connection(b), path.vertices, path.v0, path.v1)
+  else
+    ACADInterpSpline(connection(b),
+                     path.vertices,
+                     path.v0 == false ? path.vertices[2]-path.vertices[1] : path.v0,
+                     path.v1 == false ? path.vertices[end-1]-path.vertices[end] : path.v1)
+  end
+backend_stroke(b::ACAD, path::ClosedSplinePath) =
+    ACADInterpClosedSpline(connection(b), path.vertices)
+backend_fill(b::ACAD, path::ClosedSplinePath) =
+    backend_fill_curves(b, ACADInterpClosedSpline(connection(b), path.vertices))
+
 backend_fill_curves(b::ACAD, refs::ACADIds) = ACADSurfaceFromCurves(connection(b), refs)
 backend_fill_curves(b::ACAD, ref::ACADId) = ACADSurfaceFromCurves(connection(b), [ref])
 
@@ -312,7 +333,7 @@ realize(b::ACAD, s::Point) =
   ACADPoint(connection(b), s.position)
 realize(b::ACAD, s::Line) =
   ACADPolyLine(connection(b), s.vertices)
-realize(b::ACAD, s::Spline) =
+realize(b::ACAD, s::Spline) = # This should be merged with opensplinepath
   if (s.v0 == false) && (s.v1 == false)
     #ACADSpline(connection(b), s.points)
     ACADInterpSpline(connection(b),

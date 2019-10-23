@@ -1,5 +1,10 @@
 export radiance,
-       save_rad
+       save_rad,
+       radiance_material,
+       radiance_plastic_material,
+       radiance_metal_material,
+       radiance_glass_material
+
 
 write_rad_primitive(io::IO, modifier, typ, identifier, strings, ints, reals) =
   begin
@@ -485,3 +490,126 @@ export_CIE_Overcast_Sky(path::String) =
     end
     skypath
   end
+
+
+#=
+Materials
+=#
+
+struct RadianceMaterial
+  name::String
+  type::String
+  red::Real
+  green::Real
+  blue::Real
+  specularity::Union{Real, Nothing}
+  roughness::Union{Real, Nothing}
+  transmissivity::Union{Real, Nothing}
+  transmitted_specular::Union{Real, Nothing}
+end
+
+radiance_string(m::RadianceMaterial) =
+  isnothing(m.transmissivity) && isnothing(m.transmitted_specular) ?
+    isnothing(m.specularity) && isnothing(m.roughness) ?
+      "void $(m.type) $(m.name)\n0\n0\n3 $(m.red) $(m.green) $(m.blue)\n" :
+      "void $(m.type) $(m.name)\n0\n0\n5 $(m.red) $(m.green) $(m.blue) $(m.specularity) $(m.roughness)\n" :
+    "void $(m.type) $(m.name)\n0\n0\n7 $(m.red) $(m.green) $(m.blue) $(m.specularity) $(m.roughness) $(m.transmissivity) $(m.transmitted_specular)\n"
+
+Base.show(io::IO, mat::RadianceMaterial) =
+    print(io, radiance_string(mat))
+
+radiance_material(name::String, type::String;
+                  gray::Real=0.3,
+                  red::Real=gray, green::Real=gray, blue::Real=gray,
+                  specularity=nothing, roughness=nothing,
+                  transmissivity=nothing, transmitted_specular=nothing) =
+  RadianceMaterial(name, type,
+                   red, green, blue,
+                   specularity, roughness,
+                   transmissivity, transmitted_specular)
+
+radiance_plastic_material(name::String; args...) =
+  radiance_material(name, "plastic"; specularity=0, roughness=0, args...)
+
+radiance_metal_material(name::String; args...) =
+  radiance_material(name, "metal"; specularity=0, roughness=0, args...)
+
+radiance_glass_material(name::String; args...) =
+  radiance_material(name, "glass"; args...)
+
+#Some pre-defined materials
+radiance_material_white = radiance_plastic_material("white", gray=1.0)
+radiance_generic_ceiling_70 = radiance_plastic_material("GenericCeiling_70", gray=0.7)
+radiance_generic_ceiling_80 = radiance_plastic_material("GenericCeiling_80", gray=0.8)
+radiance_generic_ceiling_90 = radiance_plastic_material("HighReflectanceCeiling_90", gray=0.9)
+radiance_generic_floor_20 = radiance_plastic_material("GenericFloor_20", gray=0.2)
+radiance_generic_interior_wall_50 = radiance_plastic_material("GenericInteriorWall_50", gray=0.5)
+radiance_generic_interior_wall_70 = radiance_plastic_material("GenericInteriorWall_70", gray=0.7)
+radiance_generic_furniture_50 = radiance_plastic_material("GenericFurniture_50", gray=0.5)
+radiance_outside_facade_30 = radiance_plastic_material("OutsideFacade_30", gray=0.3)
+radiance_outside_facade_35 = radiance_plastic_material("OutsideFacade_35", gray=0.35)
+radiance_generic_glass_80 = radiance_glass_material("Glass_80", gray=0.8)
+radiance_generic_metal = radiance_metal_material("SheetMetal_80", gray=0.8)
+
+export radiance_material_white,
+       radiance_generic_ceiling_70,
+       radiance_generic_ceiling_80,
+       radiance_generic_ceiling_90,
+       radiance_generic_floor_20,
+       radiance_generic_interior_wall_50,
+       radiance_generic_interior_wall_70,
+       radiance_generic_furniture_50,
+       radiance_outside_facade_30,
+       radiance_outside_facade_35,
+       radiance_generic_glass_80,
+       radiance_generic_metal,
+       radiance_material_family,
+       radiance_slab_family,
+       radiance_outside_wall_family
+
+#=
+Radiance families need to know the different kinds of materials
+that go on each surface.
+In some cases it might be the same material, but in others, such
+as slabs, outside walls, etc, we will have different materials.
+=#
+
+abstract type RadianceFamily <: Family end
+
+struct RadianceMaterialFamily <: RadianceFamily
+  material::RadianceMaterial
+end
+
+radiance_material_family(mat::RadianceMaterial) =
+  RadianceMaterialFamily(mat)
+
+struct RadianceSlabFamily <: RadianceFamily
+  top_material::RadianceMaterial
+  bottom_material::RadianceMaterial
+end
+
+radiance_slab_family(top::RadianceMaterial, bot::RadianceMaterial=top) =
+  RadianceSlabFamily(top, bot)
+
+struct RadianceOutsideWallFamily <: RadianceFamily
+  out_material::RadianceMaterial
+  in_material::RadianceMaterial
+end
+
+radiance_outside_wall_family(out::RadianceMaterial, in::RadianceMaterial=out) =
+  RadianceOutsideWallFamily(out, in)
+
+backend_get_family_ref(b::Radiance, f::Family, rf::RadianceMaterialFamily) = rf
+
+set_backend_family(default_wall_family(), radiance,
+  radiance_material_family(radiance_generic_interior_wall_70))
+set_backend_family(default_slab_family(), radiance,
+  radiance_slab_family(radiance_generic_floor_20, radiance_generic_ceiling_80))
+set_backend_family(default_beam_family(), radiance,
+  radiance_material_family(radiance_generic_metal))
+set_backend_family(default_column_family(), radiance,
+  radiance_material_family(radiance_generic_metal))
+set_backend_family(default_door_family(), radiance,
+  radiance_material_family(radiance_generic_furniture_50))
+set_backend_family(default_panel_family(), radiance,
+  radiance_material_family(radiance_glass_material("GenericGlass", gray=0.3)))

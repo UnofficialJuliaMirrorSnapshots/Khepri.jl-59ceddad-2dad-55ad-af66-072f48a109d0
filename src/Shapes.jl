@@ -72,6 +72,10 @@ ensure_ref(b::Backend{K,T}, v::Vector{T}) where {K,T} =
   length(v) == 1 ?
     NativeRef{K,T}(v[1]) :
     UnionRef{K,T}(([NativeRef{K,T}(vi) for vi in v]...,))
+ensure_ref(b::Backend{K,T}, v::Vector{<:GenericRef{K, T}}) where {K,T} =
+  length(v) == 1 ?
+    v[1] :
+    UnionRef{K,T}((v...,))
 
 # currying
 map_ref(b::Backend{K,T}, f::Function) where {K,T} = r -> map_ref(b, f, r)
@@ -1178,8 +1182,11 @@ wall(p0::Loc, p1::Loc;
      top_level::Level=upper_level(bottom_level),
      family::WallFamily=default_wall_family(),
      offset::Real=0.0) =
-    wall([p0, p1], bottom_level=bottom_level, top_level=top_level,
-         family=family, offset=offset)
+  wall([p0, p1],
+       bottom_level=bottom_level,
+       top_level=top_level,
+       family=family,
+       offset=offset)
 
 # Right and Left considering observer looking along with curve direction
 r_thickness(w::Wall) = (+1+w.offset)/2*w.family.thickness
@@ -1228,13 +1235,13 @@ realize_wall_openings(b::Backend, w::Wall, w_ref, openings) =
     end
 
 realize_wall_opening(b::Backend, w_ref, w_path, w_thickness, op, family) =
-    let op_base_height = op.loc.y,
-        op_height = op.family.height,
-        op_thickness = op.family.thickness,
-        op_path = translate(subpath(w_path, op.loc.x, op.loc.x + op.family.width), vz(op_base_height)),
-        op_ref = ensure_ref(b, backend_wall(b, op_path, op_height, w_thickness*1.1, family))
-        ensure_ref(b, subtract_ref(b, w_ref, op_ref))
-    end
+  let op_base_height = op.loc.y,
+      op_height = op.family.height,
+      op_thickness = op.family.thickness,
+      op_path = translate(subpath(w_path, op.loc.x, op.loc.x + op.family.width), vz(op_base_height)),
+      op_ref = ensure_ref(b, backend_wall(b, op_path, op_height, w_thickness*1.1, family))
+    ensure_ref(b, subtract_ref(b, w_ref, op_ref))
+  end
 
 realize(b::Backend, s::Door) =
   let base_height = s.wall.bottom_level.height + s.loc.y,
@@ -1285,6 +1292,76 @@ backend_add_window(b::Backend, w::Wall, loc::Loc, family::WindowFamily) =
         w
     end
 
+#=
+A curtain wall is a special kind of wall that is made of a frame with windows.
+=#
+
+@deffamily(curtain_wall_frame_family, Family,
+  width::Real=0.1,
+  depth::Real=0.1,
+  depth_offset::Real=0.25)
+
+@deffamily(curtain_wall_family, Family,
+  n_curtain_panels::Int=3,
+  panel::PanelFamily=panel_family(thickness=0.05),
+  boundary_frame::CurtainWallFrameFamily=
+    curtain_wall_frame_family(width=0.1,depth=0.1,depth_offset=0.25),
+  mullion_frame::CurtainWallFrameFamily=
+    curtain_wall_frame_family(width=0.08,depth=0.09,depth_offset=0.2),
+  transom_frame::CurtainWallFrameFamily=
+    curtain_wall_frame_family(width=0.06,depth=0.1,depth_offset=0.11))
+
+@defproxy(curtain_wall, Shape3D,
+          path::Path=rectangular_path(),
+          bottom_level::Level=default_level(),
+          top_level::Level=upper_level(bottom_level),
+          family::CurtainWallFamily=default_curtain_wall_family(),
+          offset::Real=0.0)
+curtain_wall(p0::Loc, p1::Loc;
+     bottom_level::Level=default_level(),
+     top_level::Level=upper_level(bottom_level),
+     family::CurtainWallFamily=default_curtain_wall_family(),
+     offset::Real=0.0) =
+  curtain_wall([p0, p1], bottom_level=bottom_level, top_level=top_level,
+         family=family, offset=offset)
+
+realize(b::Backend, s::CurtainWall) =
+  let th = s.family.panel.thickness,
+      bfw = s.family.boundary_frame.width,
+      bfd = s.family.boundary_frame.depth,
+      bfdo = s.family.boundary_frame.depth_offset,
+      mfw = s.family.mullion_frame.width,
+      mfd = s.family.mullion_frame.depth,
+      mdfo = s.family.mullion_frame.depth_offset,
+      tfw = s.family.transom_frame.width,
+      tfd = s.family.transom_frame.depth,
+      tfdo = s.family.transom_frame.depth_offset,
+      path_length = path_length(s.path)*0.9999999,
+      pts = map(t->in_world(location_at_length(s.path, t)),
+                division(0, path_length, s.family.n_curtain_panels)),
+      path = open_polygonal_path(pts),
+      bottom = level_height(s.bottom_level),
+      top = level_height(s.top_level),
+      height = top - bottom,
+      refs = []
+    push!(refs, backend_curtain_wall(b, s, subpath(path, bfw, path_length-bfw), bottom+bfw, height-2*bfw, th, :panel))
+    push!(refs, backend_curtain_wall(b, s, path, bottom, bfw, bfd, :boundary_frame))
+    push!(refs, backend_curtain_wall(b, s, path, top-bfw, bfw, bfd, :boundary_frame))
+    push!(refs, backend_curtain_wall(b, s, subpath(path, 0, bfw), bottom+bfw, height-2*bfw, bfd, :boundary_frame))
+    push!(refs, backend_curtain_wall(b, s, subpath(path, path_length-bfw, path_length), bottom+bfw, height-2*bfw, bfd, :boundary_frame))
+    push!(refs, backend_curtain_wall(b, s, subpath(path, bfw, path_length-bfw), bottom+height/2-tfw/2, tfw, tfd, :transom_frame))
+    let n = s.family.n_curtain_panels
+      for i in 1:n-1
+        l = path_length/n*i
+        push!(refs, backend_curtain_wall(b, s, subpath(path, l-mfw/2, l+mfw/2), bfw, height-2*bfw, mfd, :mullion_frame))
+      end
+    end
+    [ensure_ref(b,r) for r in refs]
+  end
+
+backend_curtain_wall(b::Backend, s, path::Path, bottom::Real, height::Real, thickness::Real, kind::Symbol) =
+  backend_wall(b, translate(path, vz(bottom)), height, thickness, getproperty(s.family, kind))
+
 #
 # We need to redefine the default method (maybe add an option to the macro to avoid defining the meta_program)
 # This needs to be fixed for windows
@@ -1325,15 +1402,19 @@ beam(cb::Loc, ct::Loc, Angle::Real=0, Family::BeamFamily=default_beam_family(); 
 # Columns are mainly vertical elements. A column has its center axis aligned with a line defined by two points
 
 @deffamily(column_family, Family,
-    width::Real=1.0,
-    height::Real=2.0)
+    #width::Real=1.0,
+    #height::Real=2.0,
+  profile::ClosedPath=rectangular_profile(1, 2))
 
-@defproxy(column, Shape3D, cb::Loc=u0(), h::Real=1, angle::Real=0, family::ColumnFamily=default_column_family())
-column(cb::Loc, ct::Loc, Angle::Real=0, Family::ColumnFamily=default_column_family(); angle::Real=Angle, family::ColumnFamily=Family) =
+@defproxy(free_column, Shape3D, cb::Loc=u0(), h::Real=1, angle::Real=0, family::ColumnFamily=default_column_family())
+free_column(cb::Loc, ct::Loc, Angle::Real=0, Family::ColumnFamily=default_column_family(); angle::Real=Angle, family::ColumnFamily=Family) =
     let (c, h) = position_and_height(cb, ct)
-      column(c, h, angle, family)
+      free_column(c, h, angle, family)
     end
 
+@defproxy(column, Shape3D, cb::Loc=u0(), angle::Real=0,
+  bottom_level::Level=default_level(), top_level::Level=upper_level(bottom_level),
+  family::ColumnFamily=default_column_family())
 
 # Tables and chairs
 

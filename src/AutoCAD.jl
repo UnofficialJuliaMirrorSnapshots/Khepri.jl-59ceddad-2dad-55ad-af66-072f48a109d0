@@ -776,19 +776,34 @@ backend_slab(b::ACAD, profile, holes, thickness, family) =
   end
 
 realize(b::ACAD, s::Beam) =
-let profile = s.family.profile
-    profile_u0 = profile.corner
-    c = add_xy(s.cb, profile_u0.x + profile.dx/2, profile_u0.y + profile.dy/2)
-    # need to test whether it is rotation on center or on axis
-    o = loc_from_o_phi(s.cb, s.angle)
-        ACADCenteredBox(connection(b), add_y(o, -profile.dy/2), profile.dx, profile.dy, s.h)
-    end
+  let profile = s.family.profile
+      profile_u0 = profile.corner
+      c = add_xy(s.cb, profile_u0.x + profile.dx/2, profile_u0.y + profile.dy/2)
+      # need to test whether it is rotation on center or on axis
+      o = loc_from_o_phi(s.cb, s.angle)
+    ACADCenteredBox(connection(b), add_y(o, -profile.dy/2), profile.dx, profile.dy, s.h)
+  end
 #    ACADCenteredBox(connection(b), s.cb, vx(1, s.cb.cs), vy(1, s.cb.cs), s.family.width, s.family.height, s.h)
 
 #Columns are aligned along the center axis.
+realize(b::ACAD, s::FreeColumn) =
+  let profile = s.family.profile
+      profile_u0 = profile.corner
+      c = add_xy(s.cb, profile_u0.x + profile.dx/2, profile_u0.y + profile.dy/2)
+      # need to test whether it is rotation on center or on axis
+      o = loc_from_o_phi(s.cb, s.angle)
+    ACADCenteredBox(connection(b), add_y(o, -profile.dy/2), profile.dx, profile.dy, s.h)
+  end
+
 realize(b::ACAD, s::Column) =
-    let o = loc_from_o_phi(s.cb, s.angle)
-        ACADCenteredBox(connection(b), o, s.family.width, s.family.height, s.h)
+    let profile = s.family.profile,
+        profile_u0 = profile.corner,
+        c = add_xy(s.cb, profile_u0.x + profile.dx/2, profile_u0.y + profile.dy/2),
+        base_height = s.bottom_level.height,
+        height = s.top_level.height - base_height,
+        # need to test whether it is rotation on center or on axis
+        o = loc_from_o_phi(s.cb + vz(base_height), s.angle)
+      ACADCenteredBox(connection(b), add_y(o, -profile.dy/2), profile.dx, profile.dy, height)
     end
 
 backend_wall(b::ACAD, path, height, thickness, family) =

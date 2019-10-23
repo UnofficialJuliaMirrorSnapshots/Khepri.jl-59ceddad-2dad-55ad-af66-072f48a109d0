@@ -624,13 +624,14 @@ backend_slab(b::RH, profile, thickness) =
             ensure_ref(b, backend_fill(b, profile)))
 
 #Beams are aligned along the top axis.
+# THIS NEEDS TO BE FIXED TO USE PROFILES
 realize(b::RH, s::Beam) =
     let o = loc_from_o_phi(s.cb, s.angle)
         RHXYCenteredBox(connection(b), add_y(o, -s.family.height/2), vx(1, o.cs), vy(1, o.cs), s.family.width, s.family.height, s.h)
     end
 
 #Columns are aligned along the center axis.
-realize(b::RH, s::Column) =
+realize(b::RH, s::FreeColumn) =
     let o = loc_from_o_phi(s.cb, s.angle)
         RHXYCenteredBox(connection(b), o, vx(1, o.cs), vy(1, o.cs), s.family.width, s.family.height, s.h)
     end

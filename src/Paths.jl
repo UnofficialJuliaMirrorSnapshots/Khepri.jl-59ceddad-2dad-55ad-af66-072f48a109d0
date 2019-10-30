@@ -25,7 +25,6 @@ export open_path,
        stroke,
        fill,
        path_length,
-       curve_length,
        location_at_length,
        path_start,
        path_end,
@@ -37,7 +36,7 @@ abstract type Path end
 import Base.getindex, Base.firstindex, Base.lastindex
 getindex(p::Path, i::Real) = location_at_length(p, i)
 firstindex(p::Path) = 0
-lastindex(p::Path) = length(p)
+lastindex(p::Path) = path_length(p)
 getindex(p::Path, i::ClosedInterval) = subpath(p, i.left, i.right)
 
 abstract type OpenPath <: Path end
@@ -119,20 +118,21 @@ closed_spline_path(vertices=[u0(), x(), xy(), y()]) = ClosedSplinePath(ensure_no
 # 6. Produce the meta representation of a path
 
 translate(path::CircularPath, v::Vec) = circular_path(path.center + v, path.radius)
+translate(path::ArcPath, v::Vec) = arc_path(path.center + v, path.radius, path.start_angle, path.amplitude)
 translate(path::RectangularPath, v::Vec) = rectangular_path(path.corner + v, path.dx, path.dy)
 translate(path::OpenPolygonalPath, v::Vec) = open_polygonal_path(translate(path.vertices, v))
 translate(path::ClosedPolygonalPath, v::Vec) = closed_polygonal_path(translate(path.vertices, v))
-translate(path::ArcPath, v::Vec) = arc_path(path.center + v, path.radius, path.start_angle, path.amplitude)
 translate(path::OpenSplinePath, v::Vec) = open_polygonal_path(translate(path.vertices, v), path.v0, path.v1)
 translate(path::ClosedSplinePath, v::Vec) = closed_polygonal_path(translate(path.vertices, v))
 translate(ps::Locs, v::Vec) = map(p->p+v, ps)
 
 
-curve_length(path::CircularPath) = 2*pi*path.radius
-curve_length(path::RectangularPath) = 2*(path.dx + path.dy)
-curve_length(path::OpenPolygonalPath) = curve_length(path.vertices)
-curve_length(path::ClosedPolygonalPath) = curve_length(path.vertices) + distance(path.vertices[end], path.vertices[1])
-curve_length(ps::Locs) =
+path_length(path::CircularPath) = 2*pi*path.radius
+path_length(path::ArcPath) = path.radius*path.amplitude
+path_length(path::RectangularPath) = 2*(path.dx + path.dy)
+path_length(path::OpenPolygonalPath) = path_length(path.vertices)
+path_length(path::ClosedPolygonalPath) = path_length(path.vertices) + distance(path.vertices[end], path.vertices[1])
+path_length(ps::Locs) =
   let p = ps[1]
       l = 0.0
     for i in 2:length(ps)
@@ -143,13 +143,15 @@ curve_length(ps::Locs) =
     l
   end
 
-# rename to path_length?
-
-path_length = curve_length
-
-
 location_at_length(path::CircularPath, d::Real) =
-    loc_from_o_phi(path.center + vpol(path.radius, d/path.radius), d/path.radius+pi/2)
+  loc_from_o_phi(path.center + vpol(path.radius, d/path.radius), d/path.radius + pi/2)
+location_at_length(path::ArcPath, d::Real) =
+  let Δα = d/path.radius
+    Δα <= path.amplitude ?
+      loc_from_o_phi(path.center + vpol(path.radius, path.start_angle + Δα),
+                     path.start_angle + Δα + pi/2) :
+      error("Exceeded path length by ", Δα - path.amplitude)
+  end
 location_at_length(path::RectangularPath, d::Real) =
     let d = d % (2*(path.dx + path.dy)) # remove multiple periods
         p = path.corner
@@ -194,6 +196,12 @@ location_at_length(path::ClosedPolygonalPath, d::Real) =
 
 subpath(path::CircularPath, a::Real, b::Real) =
     arc_path(path.center, path.radius, a/path.radius, (b-a)/path.radius)
+subpath(path::ArcPath, a::Real, b::Real) =
+  let Δα = (b - a)/path.radius
+    a/path.radius + Δα <= path.start_angle + path.amplitude ?
+      arc_path(path.center, path.radius, a/path.radius + path.start_angle, Δα) :
+      error("Exceeded path length by ", path.start_angle + path.amplitude - a/path.radius - Δα)
+  end
 subpath(path::RectangularPath, a::Real, b::Real) =
     subpath(convert(ClosedPolygonalPath, path), a, b)
 subpath(path::ClosedPolygonalPath, a::Real, b::Real) =
@@ -308,14 +316,14 @@ end
 open_path_ops(start, ops...) = PathOps(start, [ops...], false)
 closed_path_ops(start, ops...) = PathOps(start, [ops...], true)
 
-length(path::PathOps) =
+path_length(path::PathOps) =
     let len = mapreduce(length, +, path.ops, init=0)
         path.closed ?
         len + distance(path.start, location_at_length(path, len)) :
         len
     end
-length(op::LineOp) = length(op.vec)
-length(op::ArcOp) = op.radius*(op.amplitude)
+path_length(op::LineOp) = norm(op.vec)
+path_length(op::ArcOp) = op.radius*(op.amplitude)
 
 translate(path::PathOps, v::Vec) =
     PathOps(path.start + v, path.ops, path.closed)
@@ -330,7 +338,7 @@ location_at_length(path::PathOps, d::Real) =
     let ops = path.ops
         start = path.start
         for op in ops
-            delta = length(op)
+            delta = path_length(op)
             if d < delta
                 return location_at_length(op, start, d)
             else
@@ -342,7 +350,7 @@ location_at_length(path::PathOps, d::Real) =
     end
 
 location_at_length(op::LineOp, start::Loc, d::Real) =
-    start + op.vec*d/length(op)
+    start + op.vec*d/path_length(op)
 location_at_length(op::ArcOp, start::Loc, d::Real) =
     let center = start - vpol(op.radius, op.start_angle)
         a = d/op.radius
@@ -354,7 +362,7 @@ subpath_starting_at(path::PathOps, d::Real) =
         start = location_at_length(path, d)
         for i in 1:length(ops)
             op = ops[i]
-            delta = length(op)
+            delta = path_length(op)
             if d == delta
                 return PathOps(start, ops[i+1:end], false)
             elseif d < delta
@@ -371,7 +379,7 @@ subpath_ending_at(path::PathOps, d::Real) =
     let ops = path.ops
         for i in 1:length(ops)
             op = ops[i]
-            delta = length(op)
+            delta = path_length(op)
             if d == delta
                 return PathOps(path.start, ops[1:i], false)
             elseif d < delta
@@ -384,7 +392,7 @@ subpath_ending_at(path::PathOps, d::Real) =
     end
 
 subpath_starting_at(pathOp::LineOp, d::Real) =
-    let len = length(pathOp.vec)
+    let len = path_length(pathOp.vec)
         LineOp(pathOp.vec*(len-d)/len)
     end
 
@@ -394,7 +402,7 @@ subpath_starting_at(pathOp::ArcOp, d::Real) =
     end
 
 subpath_ending_at(pathOp::LineOp, d::Real) =
-    let len = length(pathOp.vec)
+    let len = path_length(pathOp.vec)
         LineOp(pathOp.vec*d/len)
     end
 
@@ -421,12 +429,16 @@ end
 closed_path_sequence(paths...) =
     ClosedPathSequence(ensure_connected_paths([paths...]))
 
+PathSequence = Union{OpenPathSequence, ClosedPathSequence}
+
+
 ensure_connected_paths(paths) = # AML: Finish this
     paths
 
-translate(path::T, v::Vec) where T<:Union{OpenPathSequence, ClosedPathSequence} =
+translate(path::T, v::Vec) where T<:PathSequence =
   T(translate.(path.paths, v))
-
+path_length(path::T) where T<:PathSequence =
+  sum(map(path_length, path.paths))
 # A path set is a set of independent paths.
 
 struct PathSet <: Path

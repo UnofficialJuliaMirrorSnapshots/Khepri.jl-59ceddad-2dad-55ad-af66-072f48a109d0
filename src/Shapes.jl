@@ -12,6 +12,7 @@ export Shape,
        set_length_unit,
        collecting_shapes,
        collected_shapes,
+       with_transaction,
        surface_boundary,
        curve_domain,
        surface_domain,
@@ -149,11 +150,14 @@ abstract type Proxy end
 backend(s::Proxy) = s.ref.backend
 realized(s::Proxy) = s.ref.created == s.ref.deleted + 1
 # This is so stupid. We need call-next-method.
-really_mark_deleted(s::Proxy) = s.ref.deleted = s.ref.created
+really_mark_deleted(s::Proxy) = really_mark_deleted(s.ref)
+really_mark_deleted(ref::LazyRef) = ref.deleted = ref.created
+really_mark_deleted(s::Any) = nothing
 mark_deleted(s::Proxy) = really_mark_deleted(s)
 # We also need to propagate this to all dependencies
 mark_deleted(ss::Array{<:Proxy}) = foreach(mark_deleted, ss)
 mark_deleted(s::Any) = nothing
+marked_deleted(s::Proxy) = s.ref.deleted == s.ref.created
 
 ref(s::Proxy) =
   if s.ref.created == s.ref.deleted
@@ -184,7 +188,8 @@ collect_ref(s::Shape) = collect_ref(s.ref.backend, ref(s))
 collect_ref(ss::Shapes) = mapreduce(collect_ref, vcat, ss, init=[])
 
 #=
-Whenever a shape is created, it might be eagerly realized in its backend,
+Whenever a shape is created, it might be replaced by another shape (e.g., when
+it is necessary to avoid collisions), it might be eagerly realized in its backend,
 depending on the kind of shape and on the kind of backend (and/or its current state).
 Another possibility is for the shape to be saved in some container.
 It might also be necessary to record the control flow that caused the shape to be created.
@@ -193,23 +198,46 @@ The protocol after_init takes care of that.
 =#
 
 after_init(a::Any) = a
-after_init(s::Shape) = maybe_trace(maybe_collect(maybe_realize(s)))
+after_init(s::Shape) = maybe_trace(maybe_collect(maybe_realize(maybe_replace(s))))
 
 #=
-Many backends can immediately realize a shape while supporting further modifications
-e.g., using boolean operations. Others, however, cannot do that and can only realize
-shapes by request, presumably, when they have complete information about them.
+Shapes might need to be replaced with other shapes. For example, when elements
+join at precise locations, it might be easier, from the programming point of
+view, to just duplicate the joining element. However, from the constructive
+point of view, just one joining element needs to be produced.
 =#
 
+maybe_replace(s::Any) = s
+
+#=
+Backends might need to immediately realize a shape while supporting further modifications
+e.g., using boolean operations. Others, however, cannot do that and can only realize
+shapes by request, presumably, when they have complete information about them.
+A middle term might be a backend that supports both modes.
+=#
+
+delay_realize(b::Backend, s::Shape) = s
+force_realize(b::Backend, s::Shape) = (ref(s); s)
+
+maybe_realize(s::Shape, b::Backend=backend(s)) = maybe_realize(b, s)
+
+#=
+Even if a backend is eager, it might be necessary to temporarily delay the
+realization of shapes, particularly, when the construction is incremental.
+=#
+
+delaying_realize = Parameter(false)
+maybe_realize(b::Backend, s::Shape) =
+  delaying_realize() ?
+    delay_realize(b, s) :
+    force_realize(b, s)
+
 abstract type LazyBackend{K,T} <: Backend{K,T} end
-
-maybe_realize(s::Shape, b::Backend=backend(s)) =
-  maybe_realize(b, s)
-
-maybe_realize(b::Backend, s::Shape) = force_realize(s)
 maybe_realize(b::LazyBackend, s::Shape) = delay_realize(b, s)
 delay_realize(b::LazyBackend, s::Shape) = (push!(b.shapes, s); s)
-force_realize(s::Shape) = (ref(s); s)
+
+with_transaction(fn) =
+  maybe_realize(with(fn, delaying_realize, true))
 
 #=
 Frequently, we need to collect all shapes that are created:
@@ -226,6 +254,7 @@ collecting_shapes(fn) =
         collected_shapes()
     end
 maybe_collect(s::Shape) = (in_shape_collection() && collect_shape!(s); s)
+
 
 ######################################################
 #Traceability
@@ -397,7 +426,7 @@ macro defproxy(name, parent, fields...)
     $(map((selector_name, field_name) -> :($(selector_name)(v::$(struct_name)) = v.$(field_name)),
           selector_names, field_names)...)
     Khepri.mark_deleted(v::$(struct_name)) =
-      begin
+      if ! marked_deleted(v)
         really_mark_deleted(v)
         $(map(field_name -> :(mark_deleted(v.$(field_name))), field_names)...)
       end
@@ -831,18 +860,38 @@ frame_at(s::SurfaceCircle, u::Real, v::Real) = add_pol(s.center, u, v)
 
 #####################################################################
 # BIM
-abstract type Measure <: Proxy end
+#=
+Building Information Modeling is more than just shapes.
+Each BIM element is connected to other BIM elements. A wall is connected to its
+windows and doors. A floor is connected to its walls, and stairs. Stairs connect
+different floors, etc.
 
-@defproxy(level, Measure, height::Real=0.0)
+This graph of objects needs to be build programmatically and that is one problem.
+The other problem is portability, as we want this to work in backends that are
+not BIM tools.
 
+We will start with the simplest of BIM elements, namely, levels, slabs, walls,
+windows and doors.
+=#
+
+abstract type BIMElement <: Proxy end
+abstract type Measure <: BIMElement end
+BIMElements = Vector{<:BIMElement}
+
+@defproxy(level, Measure, height::Real=0, elements::BIMElements=BIMElement[])
+levels_cache = Dict{Real,Level}()
+maybe_replace(level::Level) = get!(levels_cache, level.height, level)
+
+current_levels() = values(level_cache)
 default_level = Parameter{Level}(level())
 default_level_to_level_height = Parameter{Real}(3)
-upper_level(lvl, height=default_level_to_level_height()) = level(lvl.height + height, backend=backend(lvl))
+upper_level(lvl=default_level(), height=default_level_to_level_height()) = level(lvl.height + height, backend=backend(lvl))
+Base.:(==)(l1::Level, l2::Level) = l1.height == l2.height
 
 #default implementation
 realize(b::Backend, s::Level) = s.height
 
-export default_level, default_level_to_level_height, upper_level
+export all_levels, default_level, default_level_to_level_height, upper_level
 
 #=
 @defproxy(polygonal_mass, Shape3D, points::Locs, height::Real)
@@ -1119,6 +1168,35 @@ realize_slab_openings(b::Backend, s::Slab, s_ref, openings) =
     end
 
 #=
+Deleting a BIM element is dependent on the backend.
+But for usual backends, we use a protocol. First, we delete childs, then we
+remove ourselves from parents, finally we delete outselves.
+
+NOTE: I'm not sure this is a good idea! Constructing elements and then delete
+them will create all sorts of problems! I don't want to follow this road.
+
+@defshapeop(delete_element)
+backend_delete_element(b::Backend, e::BIMElement) =
+  let childs = child_elements(e),
+      parents = parent_elements(e)
+    map(childs) do child
+      backend_remove_child_from_parent(b, child, e)
+    end
+    map(parents) do parent
+      backend_remove_child_from_parent(b, e, parent)
+    end
+    delete_shape(e)
+  end
+
+child_elements(s::Wall) = [s.windows..., s.doors...]
+parent_elements(s::Wall) = [s.bottom_level]
+
+backend_remove_child_from_parent(b::Backend, c::Window, p::Wall) =
+  p.windows =
+=#
+
+
+#=
 Should we eliminate this?
 The rational is that an opening is not an object (like a door or a window)
 However, it might be interesting to have a computational object to store properties of the opening
@@ -1188,6 +1266,49 @@ wall(p0::Loc, p1::Loc;
        family=family,
        offset=offset)
 
+#=
+Walls can be joined. That is very important because the wall needs to have
+uniform thickness along the entire path.
+=#
+export join_walls
+join_walls(wall1, wall2) =
+  if wall1.bottom_level != wall2.bottom_level
+    error("Walls with different bottom levels")
+  elseif wall1.top_level != wall2.top_level
+    error("Walls with different top levels")
+  elseif wall1.family != wall2.family
+    error("Walls with different families")
+  elseif wall1.offset != wall2.offset
+    error("Walls with different offsets")
+  else
+    let w = wall(join_paths(wall1.path, wall2.path),
+                 wall1.bottom_level, wall1.top_level,
+                 wall1.family, wall1.offset),
+        len = path_length(wall1.path)
+      for (es,l) in ((wall1.doors, 0), (wall2.doors, len))
+        for e in es
+          add_door(w, e.loc+vx(l), e.family)
+        end
+      end
+      for (es,l) in ((wall1.windows, 0), (wall2.windows, len))
+        for e in es
+          add_window(w, e.loc+vx(l), e.family)
+        end
+      end
+      for w in (wall1, wall2)
+        delete_shapes(w.doors)
+        delete_shapes(w.windows)
+        delete_shape(w)
+      end
+      w
+    end
+  end
+
+join_walls(walls...) =
+  reduce(join_walls, walls)
+
+
+
 # Right and Left considering observer looking along with curve direction
 r_thickness(w::Wall) = (+1+w.offset)/2*w.family.thickness
 l_thickness(w::Wall) = (-1+w.offset)/2*w.family.thickness
@@ -1222,17 +1343,16 @@ realize_wall_no_openings(b::Backend, w::Wall) =
   end
 
 realize_wall_openings(b::Backend, w::Wall, w_ref, openings) =
-    let w_base_height = w.bottom_level.height,
-        w_height = w.top_level.height - w_base_height,
-        w_path = translate(w.path, vz(w_base_height)),
-        w_thickness = w.family.thickness
-        for opening in openings
-            w_ref = realize_wall_opening(b, w_ref, w_path, w_thickness, opening, w.family)
-            # This must be saved in the wall
-            realize(b, opening)
-        end
-        w_ref
+  let w_base_height = w.bottom_level.height,
+      w_height = w.top_level.height - w_base_height,
+      w_path = translate(w.path, vz(w_base_height)),
+      w_thickness = w.family.thickness
+    for opening in openings
+      w_ref = realize_wall_opening(b, w_ref, w_path, w_thickness, opening, w.family)
+      ref(opening)
     end
+    w_ref
+  end
 
 realize_wall_opening(b::Backend, w_ref, w_path, w_thickness, op, family) =
   let op_base_height = op.loc.y,
@@ -1284,13 +1404,13 @@ add_window(w::Wall=required(), loc::Loc=u0(), family::WindowFamily=default_windo
   backend_add_window(backend(w), w, loc, family)
 
 backend_add_window(b::Backend, w::Wall, loc::Loc, family::WindowFamily) =
-    let d = window(w, loc, family=family)
-        push!(w.windows, d)
-        if realized(w)
-            set_ref!(w, realize_wall_openings(b, w, ref(w), [d]))
-        end
-        w
+  let d = window(w, loc, family=family)
+    push!(w.windows, d)
+    if realized(w)
+        set_ref!(w, realize_wall_openings(b, w, ref(w), [d]))
     end
+    w
+  end
 
 #=
 A curtain wall is a special kind of wall that is made of a frame with windows.
@@ -1336,10 +1456,10 @@ realize(b::Backend, s::CurtainWall) =
       tfw = s.family.transom_frame.width,
       tfd = s.family.transom_frame.depth,
       tfdo = s.family.transom_frame.depth_offset,
-      path_length = path_length(s.path)*0.9999999,
-      pts = map(t->in_world(location_at_length(s.path, t)),
-                division(0, path_length, s.family.n_curtain_panels)),
-      path = open_polygonal_path(pts),
+      path_length = path_length(s.path),
+      #pts = map(t->in_world(location_at_length(s.path, t)),
+      #          division(0, path_length, s.family.n_curtain_panels)),
+      path = s.path, #open_polygonal_path(pts),
       bottom = level_height(s.bottom_level),
       top = level_height(s.top_level),
       height = top - bottom,
@@ -1581,7 +1701,6 @@ struct SocketBackend{K,T} <: Backend{K,T}
 end
 
 connection(b::SocketBackend{K,T}) where {K,T} = b.connection()
-
 
 reset_backend(b::SocketBackend) =
   begin

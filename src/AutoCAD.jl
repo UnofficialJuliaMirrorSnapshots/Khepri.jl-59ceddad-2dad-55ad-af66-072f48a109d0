@@ -314,13 +314,9 @@ backend_fill_curves(b::ACAD, ref::ACADId) = ACADSurfaceFromCurves(connection(b),
 backend_stroke_line(b::ACAD, vs) = ACADPolyLine(connection(b), vs)
 
 backend_stroke_arc(b::ACAD, center::Loc, radius::Real, start_angle::Real, amplitude::Real) =
-    let end_angle = start_angle + amplitude
-        if end_angle > start_angle
-            ACADArc(connection(b), center, vz(1, center.cs), radius, start_angle, end_angle)
-        else
-            ACADArc(connection(b), center, vz(1, center.cs), radius, end_angle, start_angle)
-        end
-    end
+  let end_angle = start_angle + amplitude
+    ACADArc(connection(b), center, vz(1, center.cs), radius, start_angle, end_angle)
+  end
 backend_stroke_unite(b::ACAD, refs) = ACADJoinCurves(connection(b), refs)
 
 
@@ -650,7 +646,7 @@ slice_ref(b::ACAD, r::ACADNativeRef, p::Loc, v::Vec) =
     (ACADSlice(connection(b), r.value, p, v); r)
 
 slice_ref(b::ACAD, r::ACADUnionRef, p::Loc, v::Vec) =
-    map(r->slice_ref(b, r, p, v), r.values)
+    ACADUnionRef(map(r->slice_ref(b, r, p, v), r.values))
 
 unite_refs(b::ACAD, refs::Vector{<:ACADRef}) =
     ACADUnionRef(tuple(refs...))
@@ -702,10 +698,9 @@ realize(b::ACAD, s::Rotate) =
   end
 
 realize(b::ACAD, s::Mirror) =
-  and_delete_shape(map_ref(s.shape) do r
-                    ACADMirror(connection(b), r, s.p, s.n, false)
-                   end,
-                   s.shape)
+  map_ref(s.shape) do r
+    ACADMirror(connection(b), r, s.p, s.n, false)
+  end
 
 realize(b::ACAD, s::UnionMirror) =
   let r0 = ref(s.shape),

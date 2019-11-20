@@ -201,3 +201,12 @@ remap(in, (min_in, max_in), (min_out, max_out)) =
 
 cull(template, as) =
   [a for (a, t) in zip(as, cycle(template)) if t]
+
+
+## To present errors in the backends that call back to Julia
+export errormsg
+
+errormsg(e) =
+  let b = backtrace()
+    sprint((io, e) -> showerror(io, e, b, backtrace=true), e)
+  end
